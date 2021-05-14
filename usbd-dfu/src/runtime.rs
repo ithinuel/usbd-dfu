@@ -16,8 +16,8 @@ pub trait DeviceFirmwareUpgrade: Capabilities {
 }
 
 #[allow(non_snake_case)]
-pub struct DFURuntimeClass<D: DeviceFirmwareUpgrade> {
-    handler: D,
+pub struct DFURuntimeClass<H: DeviceFirmwareUpgrade> {
+    handler: H,
     interface_number: InterfaceNumber,
     state: State,
 }
@@ -42,6 +42,10 @@ impl<H: DeviceFirmwareUpgrade> DFURuntimeClass<H> {
                 *remaining = rem;
             }
         }
+    }
+
+    pub fn handler(&mut self) -> &mut H {
+        &mut self.handler
     }
 }
 

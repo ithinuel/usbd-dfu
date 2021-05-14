@@ -9,6 +9,8 @@
 //! |      5 | 0x0802_0000 | 0x0803_FFFF |           128 |
 //! |      6 | 0x0804_0000 | 0x0805_FFFF |           128 | ...
 //! |      7 | 0x0806_0000 | 0x0807_FFFF |           128 | Application + manifest
+//! |      _ | 0x1FFF_7800 | 0x1FFF_7A0F |         0.528 | OTP Area
+//! |      _ | 0x1FFF_C000 | 0x1FFF_C00F |         0.016 | Option bytes
 
 use core::{mem::MaybeUninit, slice::from_raw_parts};
 use cortex_m::peripheral::syst::SystClkSource;
@@ -19,9 +21,9 @@ use stm32f4xx_hal::prelude::*;
 use cortex_m::interrupt;
 
 #[cfg(feature = "bootloader")]
-use usbd_dfu::mode::DeviceFirmwareUpgrade as DFU;
+type DFUImpl = DFUModeImpl;
 #[cfg(feature = "application")]
-use usbd_dfu::runtime::DeviceFirmwareUpgrade as DFU;
+type DFUImpl = DFURuntimeImpl;
 
 const APPLICATION_REGION_START: usize = 0x0804_0000;
 const APPLICATION_REGION_LENGTH: usize = (16 * 3 + 64 + 128 * 3) * 1024;
@@ -44,8 +46,7 @@ pub fn init() -> (
     usb_device::bus::UsbBusAllocator<impl usb_device::class_prelude::UsbBus>,
     impl embedded_hal::digital::v2::OutputPin,
     cortex_m::Peripherals,
-    (),
-    impl DFU,
+    DFUImpl,
 ) {
     let dp = stm32f4xx_hal::stm32::Peripherals::take().unwrap();
     let mut cp = cortex_m::Peripherals::take().unwrap();
@@ -93,7 +94,6 @@ pub fn init() -> (
         UsbBus::new(usb, unsafe { EP_MEMORY.assume_init_mut() }),
         led,
         cp,
-        (),
         dfu,
     )
 }
@@ -166,6 +166,11 @@ macro_rules! impl_capabilities {
 }
 
 pub struct DFURuntimeImpl;
+impl DFURuntimeImpl {
+    pub async fn read(&self) -> &'static str {
+        "helloworld!"
+    }
+}
 impl_capabilities!(DFURuntimeImpl);
 impl usbd_dfu::runtime::DeviceFirmwareUpgrade for DFURuntimeImpl {
     fn on_reset(&mut self) {

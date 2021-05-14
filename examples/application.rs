@@ -29,7 +29,7 @@ fn oom(layout: core::alloc::Layout) -> ! {
 
 #[cortex_m_rt::entry]
 fn main() -> ! {
-    let (usb_bus, mut led, mut cp, mut ctx, dfu) = platform::init();
+    let (usb_bus, mut led, mut cp, dfu) = platform::init();
 
     // Initialize the allocator BEFORE you use it
     let start = cortex_m_rt::heap_start() as usize;
@@ -87,7 +87,8 @@ fn main() -> ! {
 
             if let &[0x0D, ..] = &buf {
                 // read flash desc
-                platform::trigger(&mut ctx).await;
+                let v = dfu.handler().read().await;
+                dbgprint!("{:?}", v);
             }
 
             // transfers previous error to trace buffer

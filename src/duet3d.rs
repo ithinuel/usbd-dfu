@@ -11,11 +11,16 @@ use embedded_hal::digital::v2::OutputPin;
 
 pub use atsam4e_hal::debug_on_buffer::consume as consume_debug;
 
+#[cfg(feature = "bootloader")]
+type DFUImpl = DFUModeImpl;
+#[cfg(feature = "application")]
+type DFUImpl = DFURuntimeImpl;
+
 pub fn init() -> (
     usb_device::bus::UsbBusAllocator<impl usb_device::class_prelude::UsbBus>,
     impl OutputPin,
     cortex_m::Peripherals,
-    atsam4e_hal::pac::EFC
+    DFUImpl
 ) {
     // Get access to the device specific peripherals from the peripheral access crate
     let p = atsam4e_hal::pac::Peripherals::take().unwrap_or_else(|| unreachable!());
@@ -43,12 +48,13 @@ pub fn init() -> (
 
     static mut DEBUG_BUFFER: [u8; 1024] = [0; 1024];
     unsafe { atsam4e_hal::debug_on_buffer::setup_with_buffer(&mut DEBUG_BUFFER) };
-    (usb_device::bus::UsbBusAllocator::new(UsbBus::new(p.UDP, (DDP, DDM), clocks)), led, cp, p.EFC)
-}
 
-pub async fn trigger(efc: &mut atsam4e_hal::pac::EFC) {
-    let _info = FlashInfo::read(efc).await;
-    //dbgprint!("{:#?}", _info);
+    #[cfg(feature = "application")]
+    let dfu = DFURuntimeImpl { efc: p.EFC };
+    #[cfg(feature = "bootloader")]
+    let dfu = DFUModeImpl { efc: p.EFC };
+
+    (usb_device::bus::UsbBusAllocator::new(UsbBus::new(p.UDP, (DDP, DDM), clocks)), led, cp, dfu)
 }
 
 pub fn reset() -> ! {
@@ -74,12 +80,32 @@ pub struct FlashInfo {
     pub bytes_per_plane: alloc::vec::Vec<u32>,
     pub bytes_per_lock_region: alloc::vec::Vec<u32>,
 }
-impl FlashInfo {
-    pub async fn read<'efc>(efc: &'efc mut EFC) -> FlashInfo {
+
+macro_rules! impl_capabilities {
+    ($name:ty) => {
+        impl usbd_dfu::Capabilities for $name {
+            const CAN_UPLOAD: bool = true;
+            const CAN_DOWNLOAD: bool = true;
+            const IS_MANIFESTATION_TOLERANT: bool = true;
+            const WILL_DETACH: bool = false;
+            const DETACH_TIMEOUT: u16 = 5000;
+            const TRANSFER_SIZE: u16 = 4096;
+        }
+    };
+}
+
+pub struct DFURuntimeImpl {
+    /// Embedded Flash Controller
+    efc: EFC,
+}
+impl DFURuntimeImpl {
+    pub async fn read(&mut self) -> FlashInfo {
+        let efc = &mut self.efc;
         efc.fcr.write_with_zero(|w| w.fcmd().getd().fkey().passwd());
 
         use core::task::Poll;
-        futures::future::poll_fn(|_| {
+        futures::future::poll_fn(|ctx| {
+            ctx.waker().wake_by_ref();
             if efc.fsr.read().frdy().bit_is_set() {
                 Poll::Ready(())
             } else {
@@ -104,21 +130,6 @@ impl FlashInfo {
         }
     }
 }
-
-macro_rules! impl_capabilities {
-    ($name:ty) => {
-        impl usbd_dfu::Capabilities for $name {
-            const CAN_UPLOAD: bool = true;
-            const CAN_DOWNLOAD: bool = true;
-            const IS_MANIFESTATION_TOLERANT: bool = true;
-            const WILL_DETACH: bool = false;
-            const DETACH_TIMEOUT: u16 = 5000;
-            const TRANSFER_SIZE: u16 = 4096;
-        }
-    };
-}
-
-pub struct DFURuntimeImpl;
 impl_capabilities!(DFURuntimeImpl);
 impl usbd_dfu::runtime::DeviceFirmwareUpgrade for DFURuntimeImpl {
     fn on_reset(&mut self) {
@@ -144,11 +155,6 @@ impl usbd_dfu::runtime::DeviceFirmwareUpgrade for DFURuntimeImpl {
 pub struct DFUModeImpl {
     /// Embedded Flash Controller
     efc: EFC,
-}
-impl DFUModeImpl {
-    pub fn new(efc: EFC) -> Self {
-        Self { efc }
-    }
 }
 impl_capabilities!(DFUModeImpl);
 impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {

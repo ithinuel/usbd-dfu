@@ -33,7 +33,7 @@ fn main() -> ! {
         unsafe { ALLOCATOR.init(start, size) };
     }
 
-    let (usb_bus, mut _led, mut cp, mut _ctx, dfu) = platform::init();
+    let (usb_bus, mut _led, mut cp, dfu) = platform::init();
 
     let mut dfu = DFUModeClass::new(&usb_bus, dfu);
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
