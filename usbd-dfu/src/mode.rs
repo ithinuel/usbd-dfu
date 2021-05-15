@@ -62,7 +62,7 @@ impl<H: DeviceFirmwareUpgrade, B: UsbBus> DFUModeClass<H, B> {
         let req = xfer.request();
         match req.request {
             Request::DFU_GETSTATE => self.accept_get_state(xfer),
-            Request::DFU_GETSTATUS if self.handler.is_transfer_complete() => {
+            Request::DFU_GETSTATUS if !self.handler.is_transfer_complete() => {
                 self.state = State::DfuDnloadBusy(H::POLL_TIMEOUT);
                 self.accept_get_status(xfer, H::POLL_TIMEOUT)
             }
@@ -85,13 +85,15 @@ impl<H: DeviceFirmwareUpgrade, B: UsbBus> DFUModeClass<H, B> {
     fn download_idle_out(&mut self, xfer: ControlOut<B>) -> Result<()> {
         let req = xfer.request();
 
-        let _block_number = req.value;
-        let _length = req.length;
-        let _data = xfer.data();
+        let block_number = req.value;
+        let data = xfer.data();
 
         match req.request {
             Request::DFU_DNLOAD if req.length > 0 => {
                 self.state = State::DfuDnloadSync;
+                if let Err(e) = self.handler.download(block_number, data) {
+                    self.state = State::DfuError(e);
+                }
                 xfer.accept()
             }
             Request::DFU_DNLOAD if self.handler.is_transfer_complete() => {
@@ -110,7 +112,7 @@ impl<H: DeviceFirmwareUpgrade, B: UsbBus> DFUModeClass<H, B> {
                 self.accept_get_status(xfer, H::POLL_TIMEOUT)
             }
             Request::DFU_GETSTATUS
-                if H::IS_MANIFESTATION_TOLERANT && self.handler.is_manifestation_in_progress() =>
+                if H::IS_MANIFESTATION_TOLERANT && !self.handler.is_manifestation_in_progress() =>
             {
                 self.state = State::DfuIdle;
                 self.accept_get_status(xfer, H::POLL_TIMEOUT)
@@ -243,6 +245,10 @@ impl<H: DeviceFirmwareUpgrade, B: UsbBus> DFUModeClass<H, B> {
             }
             _ => {}
         }
+    }
+
+    pub fn state(&self) -> State {
+        self.state
     }
 }
 impl<B: UsbBus, H: DeviceFirmwareUpgrade> UsbClass<B> for DFUModeClass<H, B> {

@@ -4,7 +4,6 @@
 
 use alloc_cortex_m::CortexMHeap;
 
-use usbd_dfu_demo::executor;
 use usbd_dfu_demo::platform;
 
 use usb_device::prelude::*;
@@ -33,7 +32,12 @@ fn main() -> ! {
         unsafe { ALLOCATOR.init(start, size) };
     }
 
-    let (usb_bus, mut _led, mut cp, dfu) = platform::init();
+    let (usb_bus, mut _led, mut cp, mut dfu) = platform::init();
+
+    use usbd_dfu::mode::DeviceFirmwareUpgrade;
+    if dfu.is_firmware_valid() {
+        platform::jump_to_application();
+    }
 
     let mut dfu = DFUModeClass::new(&usb_bus, dfu);
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
@@ -48,13 +52,11 @@ fn main() -> ! {
         .device_protocol(0)
         .build();
 
-    executor::block_on(async move {
-        loop {
-            if cp.SYST.has_wrapped() {
-                dfu.poll(1);
-            }
-
-            usb_dev.poll(&mut [&mut dfu]);
+    loop {
+        if cp.SYST.has_wrapped() {
+            dfu.poll(1);
         }
-    })
+
+        usb_dev.poll(&mut [&mut dfu]);
+    }
 }

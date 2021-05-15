@@ -88,7 +88,7 @@ fn main() -> ! {
 
             if let &[0x0D, ..] = &buf {
                 // read flash desc
-                let v = dfu.handler().read().await;
+                let v = dfu.handler().read_manifest().await;
                 dbgprint!("{:?}", v);
             }
 

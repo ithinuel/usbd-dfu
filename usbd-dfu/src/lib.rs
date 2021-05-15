@@ -37,6 +37,9 @@ pub trait Capabilities {
     const DETACH_TIMEOUT: u16;
 
     /// Maximum number of bytes the device can accept between per control-write transaction.
+    ///
+    /// **Note:** Must be less or equal to the maximum control endpoint buffer's size usually set to
+    /// 128Bytes. See the feature `control-buffer-256` of the `usb_device` crate.
     const TRANSFER_SIZE: u16;
 }
 
@@ -94,7 +97,7 @@ impl From<Error> for u8 {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum State {
+pub enum State {
     AppIdle,
     /// Timestamp (+/- the poll latency) when the detach request was received.
     AppDetach(u32),
