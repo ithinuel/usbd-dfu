@@ -2,6 +2,8 @@
 #![no_main]
 #![feature(alloc_error_handler)]
 
+use embedded_hal::digital::v2::ToggleableOutputPin;
+
 use alloc_cortex_m::CortexMHeap;
 
 use usbd_dfu_demo::platform;
@@ -32,7 +34,7 @@ fn main() -> ! {
         unsafe { ALLOCATOR.init(start, size) };
     }
 
-    let (usb_bus, mut _led, mut cp, mut dfu) = platform::init();
+    let (usb_bus, mut led, mut cp, mut dfu) = platform::init();
 
     use usbd_dfu::mode::DeviceFirmwareUpgrade;
     if dfu.is_firmware_valid() {
@@ -52,9 +54,14 @@ fn main() -> ! {
         .device_protocol(0)
         .build();
 
+    let mut counter: usize = 0;
     loop {
         if cp.SYST.has_wrapped() {
             dfu.poll(1);
+            counter = counter.wrapping_add(1);
+            if counter % 1000 == 0 {
+                let _ = led.toggle();
+            }
         }
 
         usb_dev.poll(&mut [&mut dfu]);

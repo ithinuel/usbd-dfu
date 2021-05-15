@@ -20,8 +20,6 @@ use stm32f4xx_hal::prelude::*;
 #[cfg(any(feature = "debug-uart", feature = "debug-buffer"))]
 use cortex_m::interrupt;
 
-pub use debug::DbgWriter;
-
 #[cfg(feature = "bootloader")]
 type DFUImpl = DFUModeImpl;
 #[cfg(feature = "application")]
@@ -32,11 +30,11 @@ const APPLICATION_REGION_LENGTH: usize = (16 * 3 + 64 + 128 * 3) * 1024;
 const APPLICATION_MANIFEST_START: usize = 0x0807_0000 - 128;
 
 static mut EP_MEMORY: MaybeUninit<[u32; 256]> = MaybeUninit::uninit();
-#[cfg(feature = "application")]
-static mut DEBUG_BUFFER: MaybeUninit<[u8; 1024]> = MaybeUninit::uninit();
 
+#[cfg(feature = "debug-buffer")]
+static mut DEBUG_BUFFER: MaybeUninit<[u8; 1024]> = MaybeUninit::uninit();
 #[cfg(any(feature = "debug-uart", feature = "debug-buffer"))]
-pub static mut WRITER: Option<DbgWriter> = None;
+pub static mut WRITER: Option<debug::DbgWriter> = None;
 
 fn get_manifest() -> &'static Manifest {
     unsafe { &*(APPLICATION_MANIFEST_START as *const Manifest) }
@@ -56,7 +54,7 @@ pub fn reset() -> ! {
 
 pub fn init() -> (
     usb_device::bus::UsbBusAllocator<impl usb_device::class_prelude::UsbBus>,
-    impl embedded_hal::digital::v2::OutputPin,
+    stm32f4xx_hal::gpio::gpioa::PA10<stm32f4xx_hal::gpio::Output<stm32f4xx_hal::gpio::PushPull>>,
     cortex_m::Peripherals,
     DFUImpl,
 ) {
@@ -65,7 +63,17 @@ pub fn init() -> (
 
     let rcc = dp.RCC.constrain();
 
-    let clocks = rcc.cfgr.sysclk(48.mhz()).require_pll48clk().freeze();
+    dp.FLASH.acr.modify(|_, w| {
+        w.latency()
+            .ws3()
+            .icen()
+            .set_bit()
+            .dcen()
+            .set_bit()
+            .prften()
+            .set_bit()
+    });
+    let clocks = rcc.cfgr.sysclk(84.mhz()).require_pll48clk().freeze();
 
     cp.SYST.set_clock_source(SystClkSource::External);
     cp.SYST.set_reload(clocks.sysclk().0 / (8 * 1_000));
@@ -138,6 +146,16 @@ pub fn jump_to_application() -> ! {
         }
         //dp.RCC.constrain().cfgr.freeze();
 
+        dp.FLASH.acr.modify(|_, w| {
+            w.latency()
+                .ws0()
+                .icen()
+                .clear_bit()
+                .dcen()
+                .clear_bit()
+                .prften()
+                .clear_bit()
+        });
         cp.SCB.vtor.write(APPLICATION_REGION_START as u32);
         //cp.SCB.disable_dcache(&mut cp.CPUID);
         //cp.SCB.clean_invalidate_dcache(&mut cp.CPUID);
@@ -149,7 +167,7 @@ pub fn jump_to_application() -> ! {
 }
 
 pub async fn trigger<T>(_: &mut T) {}
-#[cfg(feature = "bootloader")]
+#[cfg(feature = "debug-uart")]
 mod debug {
     use stm32f4xx_hal::gpio::{gpioa::PA2, Alternate, AF7};
     use stm32f4xx_hal::pac;
@@ -158,7 +176,7 @@ mod debug {
     pub type DbgWriter = serial::Serial<pac::USART2, (PA2<Alternate<AF7>>, serial::NoRx)>;
 }
 
-#[cfg(feature = "application")]
+#[cfg(feature = "debug-buffer")]
 mod debug {
     pub struct DbgWriter {
         buffer: &'static mut [u8],

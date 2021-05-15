@@ -71,7 +71,7 @@ fn main() -> ! {
 
             usb_dev.poll(&mut [&mut serial, &mut dfu]);
 
-            let mut count = match serial.read(&mut buf) {
+            let mut _count = match serial.read(&mut buf) {
                 Ok(count) => {
                     let _ = led.set_low(); // Turn on
 
@@ -110,23 +110,27 @@ fn main() -> ! {
                 };
                 trace_printed = true;
             }
-            // transfers trace buffer to output buffer
-            platform::consume_debug(|dbg| {
-                let len = core::cmp::min(dbg.len(), buf.len() - count);
-                buf[count..count + len].copy_from_slice(&dbg[..len]);
-                count += len;
-                len
-            });
-            if count == 0 {
-                continue;
-            }
 
-            // transfers trace buffer to output buffer
-            let mut wr_ptr = &buf[..count];
-            while !wr_ptr.is_empty() {
-                let _ = serial.write(wr_ptr).map(|len| {
-                    wr_ptr = &wr_ptr[len..];
+            #[cfg(feature = "debug-buffer")]
+            {
+                // transfers trace buffer to output buffer
+                platform::consume_debug(|dbg| {
+                    let len = core::cmp::min(dbg.len(), buf.len() - _count);
+                    buf[_count.._count + len].copy_from_slice(&dbg[..len]);
+                    _count += len;
+                    len
                 });
+                if _count == 0 {
+                    continue;
+                }
+
+                // transfers trace buffer to output buffer
+                let mut wr_ptr = &buf[.._count];
+                while !wr_ptr.is_empty() {
+                    let _ = serial.write(wr_ptr).map(|len| {
+                        wr_ptr = &wr_ptr[len..];
+                    });
+                }
             }
 
             let _ = led.set_high(); // Turn off
