@@ -8,6 +8,5 @@ all: application bootloader
 application bootloader:
 	@cargo build --target ${TARGET} --release --features ${BOARD},$@ --example $@
 
-%.bin:
-	@cargo objcopy --target ${TARGET} --release --features ${BOARD},$(basename $@) --example $(basename $@) -- -O binary
-
+#%.bin:
+#    @cargo objcopy --target ${TARGET} --release --features ${BOARD},$(basename $@) --example $(basename $@) -- -O binary

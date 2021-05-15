@@ -25,7 +25,7 @@ type DFUImpl = DFUModeImpl;
 #[cfg(feature = "application")]
 type DFUImpl = DFURuntimeImpl;
 
-const APPLICATION_REGION_START: usize = 0x0804_0000;
+const APPLICATION_REGION_START: usize = 0x0800_4000;
 const APPLICATION_REGION_LENGTH: usize = (16 * 3 + 64 + 128 * 3) * 1024;
 const APPLICATION_MANIFEST_START: usize = 0x0807_0000 - 128;
 
@@ -53,12 +53,7 @@ pub fn init() -> (
 
     let rcc = dp.RCC.constrain();
 
-    let clocks = rcc
-        .cfgr
-        .use_hse(25.mhz())
-        .sysclk(48.mhz())
-        .require_pll48clk()
-        .freeze();
+    let clocks = rcc.cfgr.sysclk(48.mhz()).require_pll48clk().freeze();
 
     cp.SYST.set_clock_source(SystClkSource::External);
     cp.SYST.set_reload(clocks.sysclk().0 / (8 * 1_000));
@@ -167,8 +162,8 @@ macro_rules! impl_capabilities {
 
 pub struct DFURuntimeImpl;
 impl DFURuntimeImpl {
-    pub async fn read(&self) -> &'static str {
-        "helloworld!"
+    pub async fn read(&self) -> &'static Manifest {
+        get_manifest()
     }
 }
 impl_capabilities!(DFURuntimeImpl);
@@ -180,7 +175,9 @@ impl usbd_dfu::runtime::DeviceFirmwareUpgrade for DFURuntimeImpl {
     fn on_detach_request(&mut self, _timeout_ms: u16) {}
 }
 
-struct Manifest {
+#[repr(C)]
+#[derive(Debug)]
+pub struct Manifest {
     hash: [u8; 32],
 }
 
@@ -217,7 +214,7 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         _block_number: u16,
         _buf: &mut [u8],
     ) -> core::result::Result<usize, usbd_dfu::Error> {
-        todo!()
+        Err(usbd_dfu::Error::Unknown)
     }
     fn download(
         &mut self,

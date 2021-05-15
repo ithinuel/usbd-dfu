@@ -55,6 +55,8 @@ fn main() -> ! {
         .build();
 
     let mut timestamp = 0u64;
+    let mut buf = [0u8; 256];
+    let mut trace_printed = false;
 
     executor::block_on(async move {
         loop {
@@ -68,7 +70,6 @@ fn main() -> ! {
             }
 
             usb_dev.poll(&mut [&mut serial, &mut dfu]);
-            let mut buf = [0u8; 256];
 
             let mut count = match serial.read(&mut buf) {
                 Ok(count) => {
@@ -92,7 +93,8 @@ fn main() -> ! {
             }
 
             // transfers previous error to trace buffer
-            if timestamp >= 5 && usb_dev.state() == UsbDeviceState::Configured {
+            if timestamp >= 5000 && usb_dev.state() == UsbDeviceState::Configured && !trace_printed
+            {
                 unsafe {
                     let err = usbd_dfu_demo::trace::ERROR.assume_init_mut();
                     if err.len > 0 && err.len < err.buffer.len() {
@@ -102,10 +104,11 @@ fn main() -> ! {
                             core::str::from_utf8_unchecked(&err.buffer[..err.len])
                         );
                     } else {
-                        dbgprint!("All clear, you're good to go.\n");
+                        dbgprint!("All clear, you're good to go.\r\n");
                     }
                     err.len = 0;
                 };
+                trace_printed = true;
             }
             // transfers trace buffer to output buffer
             platform::consume_debug(|dbg| {
