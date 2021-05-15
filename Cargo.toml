@@ -25,6 +25,7 @@ cortex-m = "*"
 cortex-m-rt = "*"
 embedded-hal = "*"
 hmac-sha256 = "*"
+sha1 = { version = "*", default-features = false }
 
 alloc-cortex-m = "*"
 
@@ -45,6 +46,8 @@ bootloader = []
 need-alloc = []
 debug-uart = []
 debug-buffer = []
+
+use-sha256 = [ 'hmac-sha256/opt_size' ]
 
 duet3d = ['atsam4e-hal/sam4e8e']
 disco-l475 = ['stm32l4xx-hal']

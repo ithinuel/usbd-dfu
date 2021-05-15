@@ -271,8 +271,10 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         }
         #[cfg(feature = "use-sha256")]
         {
-            manifest.hash == hmac_sha256::Hash::hash(app_slice)
+            hmac_sha256::Hash::hash(app_slice) == manifest.hash
         }
+
+        // check against manifest
     }
     fn is_transfer_complete(&mut self) -> bool {
         // has write operation completed?
