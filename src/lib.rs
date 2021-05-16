@@ -1,6 +1,7 @@
 #![no_std]
 #![feature(maybe_uninit_ref)]
 #![feature(panic_info_message)]
+#![feature(const_raw_ptr_to_usize_cast)]
 
 extern crate alloc;
 

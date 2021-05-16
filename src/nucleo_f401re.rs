@@ -12,10 +12,7 @@
 //! |      _ | 0x1FFF_7800 | 0x1FFF_7A0F |         0.528 | OTP Area
 //! |      _ | 0x1FFF_C000 | 0x1FFF_C00F |         0.016 | Option bytes
 
-use core::{
-    mem::{self, MaybeUninit},
-    slice::from_raw_parts,
-};
+use core::{mem::MaybeUninit, slice::from_raw_parts};
 use cortex_m::peripheral::syst::SystClkSource;
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
 use stm32f4xx_hal::prelude::*;
@@ -32,8 +29,8 @@ type DFUImpl = DFURuntimeImpl;
 const FLASH_END: *const u8 = 0x0808_0000 as *const u8;
 const APPLICATION_REGION_START: *const u8 = 0x0800_4000 as *const u8;
 const MANIFEST_SIZE_ALIGNED: usize = ((core::mem::size_of::<Manifest>() + 127) / 128) * 128;
-const APPLICATION_MANIFEST_START: *const u8 =
-    (FLASH_END as usize - MANIFEST_SIZE_ALIGNED) as *const u8;
+const MANIFEST_START: *const u8 =
+    unsafe { ((FLASH_END as usize) - MANIFEST_SIZE_ALIGNED) as *const u8 };
 
 static mut EP_MEMORY: MaybeUninit<[u32; 256]> = MaybeUninit::uninit();
 
@@ -43,13 +40,13 @@ static mut DEBUG_BUFFER: MaybeUninit<[u8; 1024]> = MaybeUninit::uninit();
 pub static mut WRITER: Option<debug::DbgWriter> = None;
 
 fn get_manifest() -> &'static Manifest {
-    unsafe { &*(APPLICATION_MANIFEST_START as *const Manifest) }
+    unsafe { &*(MANIFEST_START as *const Manifest) }
 }
 fn get_app_array() -> &'static [u8] {
     unsafe {
         from_raw_parts(
             APPLICATION_REGION_START,
-            APPLICATION_MANIFEST_START.offset_from(APPLICATION_REGION_START) as usize,
+            MANIFEST_START.offset_from(APPLICATION_REGION_START) as usize,
         )
     }
 }
@@ -125,8 +122,7 @@ pub fn init() -> (
     #[cfg(feature = "bootloader")]
     let dfu = DFUModeImpl {
         flash: dp.FLASH,
-        upload_ptr: None,
-        download: None,
+        state: DFUModeState::None,
     };
 
     (
@@ -263,7 +259,7 @@ impl usbd_dfu::runtime::DeviceFirmwareUpgrade for DFURuntimeImpl {
     fn on_detach_request(&mut self, _timeout_ms: u16) {}
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 struct Sector(u8);
 fn get_sector(address: usize) -> Option<Sector> {
     if address < 0x0800_0000 {
@@ -353,8 +349,8 @@ impl DownloadState {
         use stm32f4xx_hal::pac::flash::cr::PSIZE_A;
 
         let usize_target_addr = self.program_ptr as usize;
-        let to_write = self.used - self.ptr;
-        // addr alignment || data left to write
+        let to_write = usize::min(self.used - self.ptr, 4);
+
         let psize = if usize_target_addr & 1 == 1 || to_write == 1 {
             PSIZE_A::PSIZE8
         } else if usize_target_addr & 2 == 2 || to_write < 4 {
@@ -368,8 +364,8 @@ impl DownloadState {
             .modify(|_, w| w.pg().set_bit().psize().variant(psize));
 
         unsafe {
-                    let ptr = self.program_ptr as *mut u8;
-                    let src = &self.array[self.ptr..self.used];
+            let ptr = self.program_ptr as *mut u8;
+            let src = &self.array[self.ptr..self.used];
             match psize {
                 PSIZE_A::PSIZE8 => {
                     core::ptr::write_volatile(ptr, src[0]);
@@ -393,10 +389,16 @@ impl DownloadState {
     }
 }
 
+enum DFUModeState {
+    DownloadState(DownloadState),
+    Upload(&'static [u8]),
+    Manifestation,
+    None,
+}
+
 pub struct DFUModeImpl {
     flash: stm32f4xx_hal::stm32::FLASH,
-    upload_ptr: Option<&'static [u8]>,
-    download: Option<DownloadState>,
+    state: DFUModeState,
 }
 
 impl_capabilities!(DFUModeImpl);
@@ -406,9 +408,8 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
     fn is_firmware_valid(&mut self) -> bool {
         let manifest = get_manifest();
 
-        let app_region = get_app_array();
-        let app_slice = &app_region[..app_region.len() - core::mem::size_of::<Manifest>()];
-        //
+        let app_slice = get_app_array();
+
         #[cfg(not(feature = "use-sha256"))]
         {
             let mut sha = sha1::Sha1::new();
@@ -421,10 +422,11 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         }
     }
     fn is_transfer_complete(&mut self) -> Result<bool, usbd_dfu::Error> {
-        self.download
-            .as_mut()
-            .unwrap_or_else(|| unreachable!())
-            .update(&mut self.flash)
+        let state = match &mut self.state {
+            DFUModeState::DownloadState(state) => state,
+            _ => return Err(usbd_dfu::Error::Unknown),
+        };
+        state.update(&mut self.flash)
     }
     fn is_manifestation_in_progress(&mut self) -> bool {
         //dbgprint!("is_manifestation_in_progress\r\n");
@@ -444,15 +446,20 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         //    block_number,
         //    buf.len()
         //);
-
-        let app_slice = self.upload_ptr.take().unwrap_or_else(get_app_array);
+        if let DFUModeState::None = self.state {
+            self.state = DFUModeState::Upload(get_app_array());
+        }
+        let app_slice = match &mut self.state {
+            DFUModeState::Upload(state) => state,
+            _ => return Err(usbd_dfu::Error::Unknown),
+        };
 
         let size = usize::min(buf.len(), app_slice.len());
         buf[..size].copy_from_slice(&app_slice[..size]);
-        if size == 0 {
-            self.upload_ptr = None;
+        if size != 0 {
+            *app_slice = &app_slice[size..];
         } else {
-            self.upload_ptr = Some(&app_slice[size..]);
+            self.state = DFUModeState::None;
         }
 
         Ok(size)
@@ -462,16 +469,21 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         _block_number: u16,
         buf: &[u8],
     ) -> core::result::Result<(), usbd_dfu::Error> {
-        //dbgprint!("download {} {}\r\n", _block_number, buf.len());
-        let state = self.download.get_or_insert_with(|| DownloadState {
-            array: [0; Self::TRANSFER_SIZE as usize],
-            ptr: 0,
-            used: 0,
-            program_ptr: APPLICATION_REGION_START,
-            current_sector: None,
-        });
+        if let DFUModeState::None = self.state {
+            self.state = DFUModeState::DownloadState(DownloadState {
+                array: [0; Self::TRANSFER_SIZE as usize],
+                ptr: 0,
+                used: 0,
+                program_ptr: APPLICATION_REGION_START,
+                current_sector: None,
+            });
+        }
+        let state = match &mut self.state {
+            DFUModeState::DownloadState(state) => state,
+            _ => return Err(usbd_dfu::Error::Unknown),
+        };
 
-        if buf.len() == 0 && state.program_ptr != APPLICATION_MANIFEST_START {
+        if buf.len() == 0 && state.program_ptr != MANIFEST_START {
             return Err(usbd_dfu::Error::NotDone);
         }
         let end_ptr = unsafe { state.program_ptr.offset(buf.len() as isize) };
