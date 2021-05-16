@@ -10,7 +10,7 @@ pub trait DeviceFirmwareUpgrade: Capabilities {
     const POLL_TIMEOUT: u32;
 
     fn is_firmware_valid(&mut self) -> bool;
-    fn is_transfer_complete(&mut self) -> bool;
+    fn is_transfer_complete(&mut self) -> core::result::Result<bool, Error>;
     fn is_manifestation_in_progress(&mut self) -> bool;
 
     fn upload(&mut self, block_number: u16, buf: &mut [u8]) -> core::result::Result<usize, Error>;
@@ -62,13 +62,13 @@ impl<H: DeviceFirmwareUpgrade, B: UsbBus> DFUModeClass<H, B> {
         let req = xfer.request();
         match req.request {
             Request::DFU_GETSTATE => self.accept_get_state(xfer),
-            Request::DFU_GETSTATUS if !self.handler.is_transfer_complete() => {
-                self.state = State::DfuDnloadBusy(H::POLL_TIMEOUT);
-                self.accept_get_status(xfer, H::POLL_TIMEOUT)
-            }
             Request::DFU_GETSTATUS => {
-                self.state = State::DfuDnloadIdle;
-                self.accept_get_status(xfer, 1)
+                self.state = match self.handler.is_transfer_complete() {
+                    Ok(true) => State::DfuDnloadIdle,
+                    Ok(false) => State::DfuDnloadBusy(H::POLL_TIMEOUT),
+                    Err(e) => State::DfuError(e),
+                };
+                self.accept_get_status(xfer, H::POLL_TIMEOUT)
             }
             _ => self.stall_in(xfer),
         }
@@ -96,9 +96,14 @@ impl<H: DeviceFirmwareUpgrade, B: UsbBus> DFUModeClass<H, B> {
                 }
                 xfer.accept()
             }
-            Request::DFU_DNLOAD if self.handler.is_transfer_complete() => {
-                self.state = State::DfuManifestSync;
-                xfer.accept()
+            Request::DFU_DNLOAD => {
+                if let Ok(true) = self.handler.is_transfer_complete() {
+                    self.state = State::DfuManifestSync;
+                    xfer.accept()
+                } else {
+                    // sets the status to StalledPkt so we can discard the transfer error
+                    self.stall_out(xfer)
+                }
             }
             _ => self.stall_out(xfer),
         }
