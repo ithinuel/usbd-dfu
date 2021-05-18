@@ -13,6 +13,8 @@ pub trait DeviceFirmwareUpgrade: Capabilities {
     fn is_transfer_complete(&mut self) -> core::result::Result<bool, Error>;
     fn is_manifestation_in_progress(&mut self) -> bool;
 
+    fn poll(&mut self) -> core::result::Result<(), Error>;
+
     fn upload(&mut self, block_number: u16, buf: &mut [u8]) -> core::result::Result<usize, Error>;
     fn download(&mut self, block_number: u16, buf: &[u8]) -> core::result::Result<(), Error>;
 }
@@ -230,24 +232,30 @@ impl<H: DeviceFirmwareUpgrade, B: UsbBus> DFUModeClass<H, B> {
 
     pub fn poll(&mut self, elapsed: u32) {
         match &mut self.state {
-            State::DfuDnloadBusy(timeout) => {
-                let remaining = timeout.saturating_sub(elapsed);
-                if remaining == 0 {
-                    self.state = State::DfuDnloadSync;
-                } else {
-                    *timeout = remaining;
+            State::DfuDnloadBusy(timeout) => match self.handler.poll() {
+                Ok(_) => {
+                    let remaining = timeout.saturating_sub(elapsed);
+                    if remaining == 0 {
+                        self.state = State::DfuDnloadSync;
+                    } else {
+                        *timeout = remaining;
+                    }
                 }
-            }
-            State::DfuManifest(timeout) => {
-                let remaining = timeout.saturating_sub(elapsed);
-                if remaining != 0 {
-                    *timeout = remaining;
-                } else if H::IS_MANIFESTATION_TOLERANT {
-                    self.state = State::DfuManifestSync;
-                } else {
-                    self.state = State::DfuManifestWaitReset;
+                Err(e) => self.state = State::DfuError(e),
+            },
+            State::DfuManifest(timeout) => match self.handler.poll() {
+                Ok(_) => {
+                    let remaining = timeout.saturating_sub(elapsed);
+                    if remaining != 0 {
+                        *timeout = remaining;
+                    } else if H::IS_MANIFESTATION_TOLERANT {
+                        self.state = State::DfuManifestSync;
+                    } else {
+                        self.state = State::DfuManifestWaitReset;
+                    }
                 }
-            }
+                Err(e) => self.state = State::DfuError(e),
+            },
             _ => {}
         }
     }

@@ -12,25 +12,25 @@
 //! |      _ | 0x1FFF_7800 | 0x1FFF_7A0F |         0.528 | OTP Area
 //! |      _ | 0x1FFF_C000 | 0x1FFF_C00F |         0.016 | Option bytes
 
-use core::{mem::MaybeUninit, slice::from_raw_parts};
+use core::mem::MaybeUninit;
 use cortex_m::peripheral::syst::SystClkSource;
 use stm32f4xx_hal::otg_fs::{UsbBus, USB};
 use stm32f4xx_hal::prelude::*;
 
 #[cfg(any(feature = "debug-uart", feature = "debug-buffer"))]
 use cortex_m::interrupt;
-use usbd_dfu::Capabilities;
+
+use dfu::Manifest;
 
 #[cfg(feature = "bootloader")]
-type DFUImpl = DFUModeImpl;
+type DFUImpl = dfu::DFUModeImpl;
 #[cfg(feature = "application")]
-type DFUImpl = DFURuntimeImpl;
+type DFUImpl = dfu::DFURuntimeImpl;
 
-const FLASH_END: *const u8 = 0x0808_0000 as *const u8;
-const APPLICATION_REGION_START: *const u8 = 0x0800_4000 as *const u8;
+const FLASH_END: usize = 0x0808_0000;
+const APPLICATION_REGION_START: usize = 0x0800_8000;
 const MANIFEST_SIZE_ALIGNED: usize = ((core::mem::size_of::<Manifest>() + 127) / 128) * 128;
-const MANIFEST_START: *const u8 =
-    unsafe { ((FLASH_END as usize) - MANIFEST_SIZE_ALIGNED) as *const u8 };
+const MANIFEST_REGION_START: usize = FLASH_END - MANIFEST_SIZE_ALIGNED;
 
 static mut EP_MEMORY: MaybeUninit<[u32; 256]> = MaybeUninit::uninit();
 
@@ -38,18 +38,6 @@ static mut EP_MEMORY: MaybeUninit<[u32; 256]> = MaybeUninit::uninit();
 static mut DEBUG_BUFFER: MaybeUninit<[u8; 1024]> = MaybeUninit::uninit();
 #[cfg(any(feature = "debug-uart", feature = "debug-buffer"))]
 pub static mut WRITER: Option<debug::DbgWriter> = None;
-
-fn get_manifest() -> &'static Manifest {
-    unsafe { &*(MANIFEST_START as *const Manifest) }
-}
-fn get_app_array() -> &'static [u8] {
-    unsafe {
-        from_raw_parts(
-            APPLICATION_REGION_START,
-            MANIFEST_START.offset_from(APPLICATION_REGION_START) as usize,
-        )
-    }
-}
 
 pub fn reset() -> ! {
     stm32f4xx_hal::stm32::SCB::sys_reset()
@@ -118,12 +106,9 @@ pub fn init() -> (
     }
 
     #[cfg(feature = "application")]
-    let dfu = DFURuntimeImpl;
+    let dfu = DFUImpl;
     #[cfg(feature = "bootloader")]
-    let dfu = DFUModeImpl {
-        flash: dp.FLASH,
-        state: DFUModeState::None,
-    };
+    let dfu = DFUImpl::new(dp.FLASH);
 
     (
         UsbBus::new(usb, unsafe { EP_MEMORY.assume_init_mut() }),
@@ -167,6 +152,28 @@ pub fn jump_to_application() -> ! {
 
         cortex_m::asm::bootload(APPLICATION_REGION_START as *const u32);
     }
+}
+
+enum MemoryState {
+    Locked,
+    Unlocked,
+    Erasing,
+    Writing {
+        buffer: [u8; <DFUImpl as usbd_dfu::Capabilities>::TRANSFER_SIZE as usize],
+        index: usize,
+        length: usize,
+    },
+}
+struct Memory {
+    sector_erased: [bool; 8],
+    // state: erase, write, verify
+    state: MemoryState,
+}
+impl Memory {
+    fn reset(&mut self) {
+        self.sector_erased.fill(false);
+    }
+    fn program(&mut self, address: usize, data: &[u8]) -> () {}
 }
 
 pub async fn trigger<T>(_: &mut T) {}
@@ -231,269 +238,10 @@ macro_rules! dbgprint {
     };
 }
 
-macro_rules! impl_capabilities {
-    ($name:ty) => {
-        impl ::usbd_dfu::Capabilities for $name {
-            const CAN_UPLOAD: bool = true;
-            const CAN_DOWNLOAD: bool = true;
-            const IS_MANIFESTATION_TOLERANT: bool = false;
-            const WILL_DETACH: bool = true;
-            const DETACH_TIMEOUT: u16 = 50;
-            const TRANSFER_SIZE: u16 = 128;
-        }
-    };
+#[macro_export]
+#[cfg(not(any(feature = "debug-uart", feature = "debug-buffer")))]
+macro_rules! dbgprint {
+    ($($arg:tt)*) => {};
 }
 
-pub struct DFURuntimeImpl;
-impl DFURuntimeImpl {
-    pub async fn read_manifest(&self) -> &'static Manifest {
-        get_manifest()
-    }
-}
-impl_capabilities!(DFURuntimeImpl);
-impl usbd_dfu::runtime::DeviceFirmwareUpgrade for DFURuntimeImpl {
-    fn on_reset(&mut self) {
-        reset();
-    }
-
-    fn on_detach_request(&mut self, _timeout_ms: u16) {}
-}
-
-#[derive(Debug, PartialEq, Copy, Clone)]
-struct Sector(u8);
-fn get_sector(address: usize) -> Option<Sector> {
-    if address < 0x0800_0000 {
-        None
-    } else if address < 0x0801_0000 {
-        let id = (address >> 14) & 0x0F;
-        Some(Sector(id as u8))
-    } else if address < 0x0802_0000 {
-        Some(Sector(4))
-    } else if address < 0x0808_0000 {
-        let id = ((address >> 17) & 0x0F) + 4;
-        Some(Sector(id as u8))
-    } else {
-        None
-    }
-}
-
-#[cfg(not(feature = "use-sha256"))]
-const HASH_LENGTH: usize = 20;
-#[cfg(feature = "use-sha256")]
-const HASH_LENGTH: usize = 32;
-
-#[repr(C)]
-#[derive(Debug)]
-pub struct Manifest {
-    hash: [u8; HASH_LENGTH],
-}
-
-struct DownloadState {
-    array: [u8; DFUModeImpl::TRANSFER_SIZE as usize],
-    used: usize,
-    ptr: usize,
-    program_ptr: *const u8,
-    current_sector: Option<Sector>,
-}
-impl DownloadState {
-    fn update(&mut self, flash: &mut stm32f4xx_hal::pac::FLASH) -> Result<bool, usbd_dfu::Error> {
-        let sr = flash.sr.read();
-        let is_idle = sr.bsy().bit_is_clear();
-        if is_idle {
-            //Err(usbd_dfu::Error::Erase)
-            //Err(usbd_dfu::Error::Verify)
-            //Err(usbd_dfu::Error::CheckErased)
-            //Err(usbd_dfu::Error::Programming)
-            if sr.bits() != 0 {
-                Err(usbd_dfu::Error::Programming)
-            } else if self.ptr < self.used {
-                self.unlock(flash)?;
-
-                let target_addr = self.program_ptr;
-                let sector = get_sector(target_addr as usize).unwrap();
-                if Some(sector) != self.current_sector {
-                    self.erase_sector(flash, sector);
-                } else {
-                    self.program(flash);
-                }
-
-                Ok(false)
-            } else {
-                Ok(true)
-            }
-        } else {
-            Ok(false)
-        }
-    }
-
-    fn unlock(&mut self, flash: &mut stm32f4xx_hal::pac::FLASH) -> Result<(), usbd_dfu::Error> {
-        if flash.cr.read().lock().bit_is_set() {
-            flash.keyr.write(|w| unsafe { w.bits(0x45670123) });
-            flash.keyr.write(|w| unsafe { w.bits(0xCDEF89AB) });
-
-            if flash.cr.read().lock().bit_is_set() {
-                return Err(usbd_dfu::Error::Write);
-            }
-        }
-        Ok(())
-    }
-
-    fn erase_sector(&mut self, flash: &mut stm32f4xx_hal::pac::FLASH, sector: Sector) {
-        flash
-            .cr
-            .modify(|_, w| unsafe { w.ser().set_bit().snb().bits(sector.0) });
-        flash.cr.modify(|_, w| w.strt().set_bit());
-    }
-
-    fn program(&mut self, flash: &mut stm32f4xx_hal::pac::FLASH) {
-        use stm32f4xx_hal::pac::flash::cr::PSIZE_A;
-
-        let usize_target_addr = self.program_ptr as usize;
-        let to_write = usize::min(self.used - self.ptr, 4);
-
-        let psize = if usize_target_addr & 1 == 1 || to_write == 1 {
-            PSIZE_A::PSIZE8
-        } else if usize_target_addr & 2 == 2 || to_write < 4 {
-            PSIZE_A::PSIZE16
-        } else {
-            PSIZE_A::PSIZE32
-        };
-
-        flash
-            .cr
-            .modify(|_, w| w.pg().set_bit().psize().variant(psize));
-
-        unsafe {
-            let ptr = self.program_ptr as *mut u8;
-            let src = &self.array[self.ptr..self.used];
-            match psize {
-                PSIZE_A::PSIZE8 => {
-                    core::ptr::write_volatile(ptr, src[0]);
-                    self.ptr += 1;
-                }
-                PSIZE_A::PSIZE16 => {
-                    let ptr = ptr as *mut u16;
-                    let src = core::ptr::read(src.as_ptr() as *const u16);
-                    core::ptr::write_volatile(ptr, src);
-                    self.ptr += 2;
-                }
-                PSIZE_A::PSIZE32 => {
-                    let ptr = ptr as *mut u32;
-                    let src = core::ptr::read(src.as_ptr() as *const u32);
-                    core::ptr::write_volatile(ptr, src);
-                    self.ptr += 4;
-                }
-                PSIZE_A::PSIZE64 => unreachable!(),
-            }
-        }
-    }
-}
-
-enum DFUModeState {
-    DownloadState(DownloadState),
-    Upload(&'static [u8]),
-    Manifestation,
-    None,
-}
-
-pub struct DFUModeImpl {
-    flash: stm32f4xx_hal::stm32::FLASH,
-    state: DFUModeState,
-}
-
-impl_capabilities!(DFUModeImpl);
-impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
-    const POLL_TIMEOUT: u32 = 1;
-
-    fn is_firmware_valid(&mut self) -> bool {
-        let manifest = get_manifest();
-
-        let app_slice = get_app_array();
-
-        #[cfg(not(feature = "use-sha256"))]
-        {
-            let mut sha = sha1::Sha1::new();
-            sha.update(app_slice);
-            manifest.hash == sha.digest().bytes()
-        }
-        #[cfg(feature = "use-sha256")]
-        {
-            manifest.hash == hmac_sha256::Hash::hash(app_slice)
-        }
-    }
-    fn is_transfer_complete(&mut self) -> Result<bool, usbd_dfu::Error> {
-        let state = match &mut self.state {
-            DFUModeState::DownloadState(state) => state,
-            _ => return Err(usbd_dfu::Error::Unknown),
-        };
-        state.update(&mut self.flash)
-    }
-    fn is_manifestation_in_progress(&mut self) -> bool {
-        //dbgprint!("is_manifestation_in_progress\r\n");
-        //let manifestation = self.download_ptr == APPLICATION_REGION_LENGTH;
-        //self.download_ptr = 0;
-        false
-    }
-
-    fn upload(
-        &mut self,
-        _block_number: u16,
-        buf: &mut [u8],
-    ) -> core::result::Result<usize, usbd_dfu::Error> {
-        //dbgprint!(
-        //    "{:?} {} {}\r\n",
-        //    self.upload_ptr.map(|slice| slice.len()),
-        //    block_number,
-        //    buf.len()
-        //);
-        if let DFUModeState::None = self.state {
-            self.state = DFUModeState::Upload(get_app_array());
-        }
-        let app_slice = match &mut self.state {
-            DFUModeState::Upload(state) => state,
-            _ => return Err(usbd_dfu::Error::Unknown),
-        };
-
-        let size = usize::min(buf.len(), app_slice.len());
-        buf[..size].copy_from_slice(&app_slice[..size]);
-        if size != 0 {
-            *app_slice = &app_slice[size..];
-        } else {
-            self.state = DFUModeState::None;
-        }
-
-        Ok(size)
-    }
-    fn download(
-        &mut self,
-        _block_number: u16,
-        buf: &[u8],
-    ) -> core::result::Result<(), usbd_dfu::Error> {
-        if let DFUModeState::None = self.state {
-            self.state = DFUModeState::DownloadState(DownloadState {
-                array: [0; Self::TRANSFER_SIZE as usize],
-                ptr: 0,
-                used: 0,
-                program_ptr: APPLICATION_REGION_START,
-                current_sector: None,
-            });
-        }
-        let state = match &mut self.state {
-            DFUModeState::DownloadState(state) => state,
-            _ => return Err(usbd_dfu::Error::Unknown),
-        };
-
-        if buf.len() == 0 && state.program_ptr != MANIFEST_START {
-            return Err(usbd_dfu::Error::NotDone);
-        }
-        let end_ptr = unsafe { state.program_ptr.offset(buf.len() as isize) };
-        if end_ptr >= FLASH_END {
-            return Err(usbd_dfu::Error::Address);
-        }
-
-        state.array[..buf.len()].copy_from_slice(buf);
-        state.used = buf.len();
-        state.ptr = 0;
-        Ok(())
-    }
-}
+mod dfu;
