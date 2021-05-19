@@ -12,10 +12,13 @@
 //! |      _ | 0x1FFF_7800 | 0x1FFF_7A0F |         0.528 | OTP Area
 //! |      _ | 0x1FFF_C000 | 0x1FFF_C00F |         0.016 | Option bytes
 
-use core::mem::MaybeUninit;
+use core::{convert::TryFrom, mem::MaybeUninit};
 use cortex_m::peripheral::syst::SystClkSource;
-use stm32f4xx_hal::otg_fs::{UsbBus, USB};
 use stm32f4xx_hal::prelude::*;
+use stm32f4xx_hal::{
+    otg_fs::{UsbBus, USB},
+    time::MilliSeconds,
+};
 
 #[cfg(any(feature = "debug-uart", feature = "debug-buffer"))]
 use cortex_m::interrupt;
@@ -154,24 +157,186 @@ pub fn jump_to_application() -> ! {
     }
 }
 
+#[derive(Debug, PartialEq, Copy, Clone)]
+struct Sector(u8);
+impl Sector {
+    fn is_erased(&self) -> bool {
+        let (addr, length) = match self.0 {
+            0 => (0x0800_0000, 16 * 1024),
+            1 => (0x0800_4000, 16 * 1024),
+            2 => (0x0800_8000, 16 * 1024),
+            3 => (0x0800_C000, 16 * 1024),
+            4 => (0x0801_0000, 64 * 1024),
+            5 => (0x0802_0000, 128 * 1024),
+            6 => (0x0804_0000, 128 * 1024),
+            7 => (0x0806_0000, 128 * 1024),
+        };
+        let arr = unsafe { core::slice::from_raw_parts(addr as *const u32, length / 4) };
+        !arr.iter().cloned().all(|b| b == 0xFFFF_FFFF)
+    }
+}
+impl TryFrom<usize> for Sector {
+    type Error = usbd_dfu::Error;
+
+    fn try_from(address: usize) -> Result<Self, Self::Error> {
+        if address < 0x0800_0000 {
+            Err(usbd_dfu::Error::Address)
+        } else if address < 0x0801_0000 {
+            let id = (address >> 14) & 0x0F;
+            Ok(Sector(id as u8))
+        } else if address < 0x0802_0000 {
+            Ok(Sector(4))
+        } else if address < 0x0808_0000 {
+            let id = ((address >> 17) & 0x0F) + 4;
+            Ok(Sector(id as u8))
+        } else {
+            Err(usbd_dfu::Error::Address)
+        }
+    }
+}
+
+struct MemoryStateWriting {
+    buffer: [u8; <DFUImpl as usbd_dfu::Capabilities>::TRANSFER_SIZE as usize],
+    index: usize,
+    length: usize,
+    program_addr: usize,
+}
+impl MemoryStateWriting {
+    fn program(&mut self, flash: &mut stm32f4xx_hal::pac::FLASH) {
+        todo!()
+        //use stm32f4xx_hal::pac::flash::cr::PSIZE_A;
+
+        //let usize_target_addr = self.program_ptr as usize;
+        //let to_write = usize::min(self.used - self.ptr, 4);
+
+        //let psize = if usize_target_addr & 1 == 1 || to_write == 1 {
+        //    PSIZE_A::PSIZE8
+        //} else if usize_target_addr & 2 == 2 || to_write < 4 {
+        //    PSIZE_A::PSIZE16
+        //} else {
+        //    PSIZE_A::PSIZE32
+        //};
+
+        //flash
+        //    .cr
+        //    .modify(|_, w| w.pg().set_bit().psize().variant(psize));
+
+        //unsafe {
+        //    let ptr = self.program_ptr. as *mut u8;
+        //    let src = &self.array[self.ptr..self.used];
+        //    match psize {
+        //        PSIZE_A::PSIZE8 => {
+        //            core::ptr::write_volatile(ptr, src[0]);
+        //            self.ptr += 1;
+        //        }
+        //        PSIZE_A::PSIZE16 => {
+        //            let ptr = ptr as *mut u16;
+        //            let src = core::ptr::read(src.as_ptr() as *const u16);
+        //            core::ptr::write_volatile(ptr, src);
+        //            self.ptr += 2;
+        //            self.program_addr += 2;
+        //        }
+        //        PSIZE_A::PSIZE32 => {
+        //            let ptr = ptr as *mut u32;
+        //            let src = core::ptr::read(src.as_ptr() as *const u32);
+        //            core::ptr::write_volatile(ptr, src);
+        //            self.ptr += 4;
+        //            self.program_addr += 4;
+        //        }
+        //        PSIZE_A::PSIZE64 => unreachable!(),
+        //    }
+        //}
+    }
+}
+
 enum MemoryState {
-    Locked,
-    Unlocked,
-    Erasing,
-    Writing {
-        buffer: [u8; <DFUImpl as usbd_dfu::Capabilities>::TRANSFER_SIZE as usize],
-        index: usize,
-        length: usize,
-    },
+    Idle,
+    Reading(&'static [u8]),
+    Erasing(Sector, MemoryStateWriting),
+    Writing(MemoryStateWriting),
+}
+enum MemoryStatus {
+    Idle,
+    Busy,
+    Error(usbd_dfu::Error),
 }
 struct Memory {
-    sector_erased: [bool; 8],
+    sector_has_been_erased: [bool; 8],
+    flash: stm32f4xx_hal::pac::FLASH,
     // state: erase, write, verify
     state: MemoryState,
 }
 impl Memory {
+    fn new(flash: stm32f4xx_hal::pac::FLASH) -> Self {
+        while flash.sr.read().bsy().bit_is_set() {
+            cortex_m::asm::nop();
+        }
+        Self {
+            sector_has_been_erased: [false; 8],
+            flash,
+            state: MemoryState::Idle,
+        }
+    }
     fn reset(&mut self) {
-        self.sector_erased.fill(false);
+        *self = Self::new(self.flash)
+    }
+    fn is_locked(&self) -> bool {
+        flash.cr.read().lock().bit_is_set()
+    }
+    fn poll(&mut self) -> Result<(), usbd_dfu::Error> {
+        let sr = flash.sr.read();
+        let is_idle = sr.bsy().bit_is_clear();
+        if is_idle {
+            //Err(usbd_dfu::Error::Programming)
+            match &mut self.state {
+                MemoryState::Idle | MemoryState::Reading(_) => {}
+                MemoryState::Erasing(sector, state) => {
+                    // check sector is erased
+                    //
+                    if sr.bits() != 0 {
+                        self.reset();
+                        return Err(usbd_dfu::Error::Erase);
+                    }
+                    if !sector.is_erased() {
+                        self.reset();
+                        return Err(usbd_dfu::Error::CheckErased);
+                    }
+                    self.state = MemoryState::Writing(*state);
+                }
+                MemoryState::Writing(state) => {
+                    if self.is_locked() {
+                        self.flash.keyr.write(|w| unsafe { w.bits(0x45670123) });
+                        self.flash.keyr.write(|w| unsafe { w.bits(0xCDEF89AB) });
+
+                        if self.flash.cr.read().lock().bit_is_set() {
+                            self.reset();
+                            return Err(usbd_dfu::Error::Write);
+                        }
+                    }
+                    if index < length {
+                        let sector = Sector::try_from(state.program_addr)?;
+                        if !self.sector_has_been_erased[sector.0 as usize] {
+                            self.flash
+                                .cr
+                                .modify(|_, w| unsafe { w.ser().set_bit().snb().bits(sector.0) });
+                            self.flash.cr.modify(|_, w| w.strt().set_bit());
+                            self.state = MemoryState::Erasing(sector, *state);
+                        } else {
+                            state.program(&mut self.flash);
+                        }
+                    } else {
+                        /* verify */
+                        let rd_ptr = unsafe { core::slice::from_raw_parts(program_addr, length) };
+                        if rd_ptr != &buffer[..length] {
+                            self.reset();
+                            return Err(usbd_dfu::Error::Verify);
+                        }
+                        self.state = MemoryState::Idle
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     fn program(&mut self, address: usize, data: &[u8]) -> () {}
 }
