@@ -194,13 +194,45 @@ impl TryFrom<usize> for Sector {
         }
     }
 }
+impl Iterator for Sector {
+    type Item = Sector;
 
-struct MemoryStateWriting {
-    buffer: [u8; <DFUImpl as usbd_dfu::Capabilities>::TRANSFER_SIZE as usize],
-    index: usize,
-    length: usize,
-    program_addr: usize,
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.0 < 7 {
+            Some(Sector(self.0 + 1))
+        } else {
+            None
+        }
+    }
 }
+
+//  loop {
+//      await more data
+//      loop {
+//          erase sector
+//          await while busy
+//          check erase
+//          loop {
+//              program data
+//              await while busy
+//              check programmed
+//          }
+//      }
+//  }
+//  loop {
+//      erase next sector
+//      await while busy
+//      check erase
+//  }
+//  prepare manifest
+//  loop {
+//      program manifest
+//      await while busy
+//      check programmed
+//  }
+//
+
+struct MemoryStateWriting {}
 impl MemoryStateWriting {
     fn program(&mut self, flash: &mut stm32f4xx_hal::pac::FLASH) {
         todo!()
@@ -249,11 +281,24 @@ impl MemoryStateWriting {
     }
 }
 
+enum ProgrammingActivity {
+    Erase,
+    Write,
+    Manifest,
+}
+struct ProgrammingState {
+    buffer: [u8; <DFUImpl as usbd_dfu::Capabilities>::TRANSFER_SIZE as usize],
+    index: usize,
+    length: usize,
+
+    program_addr: usize,
+    state: ProgrammingActivity,
+}
+
 enum MemoryState {
     Idle,
     Reading(&'static [u8]),
-    Erasing(Sector, MemoryStateWriting),
-    Writing(MemoryStateWriting),
+    Programming(ProgrammingState),
 }
 enum MemoryStatus {
     Idle,
@@ -261,7 +306,6 @@ enum MemoryStatus {
     Error(usbd_dfu::Error),
 }
 struct Memory {
-    sector_has_been_erased: [bool; 8],
     flash: stm32f4xx_hal::pac::FLASH,
     // state: erase, write, verify
     state: MemoryState,
