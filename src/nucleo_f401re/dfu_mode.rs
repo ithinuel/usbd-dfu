@@ -1,18 +1,81 @@
+use alloc::{boxed::Box, rc::Rc};
+use core::{cell::RefCell, convert::TryFrom, pin::Pin, task::Context};
+
+use futures::{Future, TryFutureExt};
+
+use super::super::{DFUImpl, Manifest, Memory, Result, Sector, MANIFEST_REGION_START};
 use super::ApplicationRef;
 
+async fn program<F: futures::Future<Output = Result<usize>>>(
+    mut addr: usize,
+    mut receive: impl FnMut(&mut [u8]) -> F,
+    memory: Rc<RefCell<Memory>>,
+) -> Result<()> {
+    let mut memory = memory
+        .try_borrow_mut()
+        .map_err(|_| usbd_dfu::Error::Unknown)?;
+
+    let mut buffer = [0u8; <DFUImpl as usbd_dfu::Capabilities>::TRANSFER_SIZE as usize];
+    let mut current_sector = Sector::try_from(addr)?;
+    let mut app_length = 0;
+    loop {
+        let len = receive(&mut buffer).await?;
+        if len == 0 {
+            break;
+        }
+        app_length += len;
+
+        let mut wr_slice = &buffer[..len];
+        while wr_slice.len() > 0 {
+            let sector = Sector::try_from(addr)?;
+            if sector != current_sector {
+                memory.erase(sector).await?;
+                current_sector = sector;
+            }
+
+            let increment = memory.program(addr, wr_slice).await?;
+            addr += increment;
+            wr_slice = &wr_slice[increment..];
+        }
+    }
+
+    // erase remaining memory
+    for sector in current_sector {
+        memory.erase(sector).await?;
+    }
+
+    let manifest = Manifest {
+        length: app_length,
+        hash: ApplicationRef::get_with_length(app_length).compute_hash(),
+    };
+    let manifest: [u8; core::mem::size_of::<Manifest>()] =
+        unsafe { core::mem::transmute(manifest) };
+
+    let mut wr_slice = &manifest[..];
+    let mut addr = MANIFEST_REGION_START;
+    while wr_slice.len() > 0 {
+        let increment = memory.program(addr, wr_slice).await?;
+        addr += increment;
+        wr_slice = &wr_slice[increment..];
+    }
+    Ok(())
+}
+
 enum DFUModeState {
-    DownloadState,
+    DownloadState(core::pin::Pin<alloc::boxed::Box<dyn Future<Output = Result<()>>>>),
     Upload(&'static [u8]),
     None,
 }
 
 pub struct DFUModeImpl {
     state: DFUModeState,
+    memory: alloc::rc::Rc<core::cell::RefCell<Memory>>,
 }
 impl DFUModeImpl {
-    pub fn new<T>(_: T) -> Self {
+    pub(crate) fn new(memory: Memory) -> Self {
         Self {
             state: DFUModeState::None,
+            memory: alloc::rc::Rc::new(core::cell::RefCell::new(memory)),
         }
     }
 }
@@ -29,7 +92,7 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         let app = ApplicationRef::get();
         app.compute_hash() == manifest.hash
     }
-    fn is_transfer_complete(&mut self) -> Result<bool, usbd_dfu::Error> {
+    fn is_transfer_complete(&mut self) -> Result<bool> {
         todo!()
         //let state = match &mut self.state {
         //    DFUModeState::DownloadState(state) => state,
@@ -47,19 +110,21 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         false
     }
 
-    fn poll(&mut self) -> Result<(), usbd_dfu::Error> {
-        todo!()
-        //match &mut self.state {
-        //    DFUModeState::DownloadState(state) => state.update(&mut self.flash).map(|_| ()),
-        //    _ => Ok(()),
-        //}
+    fn poll(&mut self) -> Result<()> {
+        match &mut self.state {
+            DFUModeState::DownloadState(state) => {
+                if let Some(res) = crate::executor::poll_once(state) {
+                    self.state = DFUModeState::None;
+                    res
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Ok(()),
+        }
     }
 
-    fn upload(
-        &mut self,
-        _block_number: u16,
-        buf: &mut [u8],
-    ) -> core::result::Result<usize, usbd_dfu::Error> {
+    fn upload(&mut self, _block_number: u16, buf: &mut [u8]) -> Result<usize> {
         //dbgprint!(
         //    "{:?} {} {}\r\n",
         //    self.upload_ptr.map(|slice| slice.len()),
@@ -85,20 +150,23 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         //Ok(size)
         todo!()
     }
-    fn download(
-        &mut self,
-        _block_number: u16,
-        buf: &[u8],
-    ) -> core::result::Result<(), usbd_dfu::Error> {
+    fn download(&mut self, _block_number: u16, buf: &[u8]) -> Result<()> {
         dbgprint!("{}-{}\r\n", _block_number, buf.len());
+
+        self.state = DFUModeState::DownloadState(Box::pin(program(
+            super::APPLICATION_REGION_START,
+            |buffer| {
+                core::future::poll_fn(|ctx| {
+                    ctx.waker().wake_by_ref();
+                    core::task::Poll::Ready(Ok(0))
+                })
+            },
+            self.memory.clone(),
+        ))
+            as Pin<Box<dyn Future<Output = Result<()>>>>);
 
         //if let DFUModeState::None = self.state {
         //    self.state = DFUModeState::DownloadState(DownloadState {
-        //        array: [0; Self::TRANSFER_SIZE as usize],
-        //        ptr: 0,
-        //        used: 0,
-        //        program_ptr: APPLICATION_REGION_START as *const u8,
-        //        current_sector: None,
         //    });
         //}
         //let state = match &mut self.state {

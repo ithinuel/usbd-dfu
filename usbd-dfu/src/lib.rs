@@ -1,7 +1,5 @@
 #![no_std]
 
-pub use usb_device::Result;
-
 pub mod mode;
 pub mod runtime;
 
@@ -42,6 +40,8 @@ pub trait Capabilities {
     /// 128Bytes. See the feature `control-buffer-256` of the `usb_device` crate.
     const TRANSFER_SIZE: u16;
 }
+
+pub type Result<T> = core::result::Result<T, Error>;
 
 struct Request;
 impl Request {

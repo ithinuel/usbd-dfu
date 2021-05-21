@@ -22,11 +22,9 @@ const APPLICATION_LENGTH: usize = MANIFEST_REGION_START - APPLICATION_REGION_STA
 type Hash = [u8; HASH_LENGTH];
 
 #[repr(C)]
-struct ApplicationRef(&'static [u8]);
+pub struct ApplicationRef(&'static [u8]);
 impl ApplicationRef {
-    fn get() -> Self {
-        let manifest = Manifest::get();
-        let length = usize::min(APPLICATION_LENGTH, manifest.application_length);
+    pub fn get_with_length(length: usize) -> Self {
         unsafe {
             Self(core::slice::from_raw_parts(
                 APPLICATION_REGION_START as *const u8,
@@ -34,7 +32,12 @@ impl ApplicationRef {
             ))
         }
     }
-    fn compute_hash(&self) -> Hash {
+    fn get() -> Self {
+        let manifest = Manifest::get();
+        let length = usize::min(APPLICATION_LENGTH, manifest.length);
+        Self::get_with_length(length)
+    }
+    pub fn compute_hash(&self) -> Hash {
         #[cfg(not(feature = "use-sha256"))]
         {
             let mut sha = sha1::Sha1::new();
@@ -51,7 +54,7 @@ impl ApplicationRef {
 #[repr(C)]
 #[derive(Debug)]
 pub struct Manifest {
-    pub application_length: usize,
+    pub length: usize,
     pub hash: [u8; HASH_LENGTH],
 }
 impl Manifest {

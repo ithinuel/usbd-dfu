@@ -2,6 +2,7 @@
 #![feature(maybe_uninit_ref)]
 #![feature(panic_info_message)]
 #![feature(const_raw_ptr_to_usize_cast)]
+#![feature(future_poll_fn)]
 
 extern crate alloc;
 
