@@ -1,21 +1,4 @@
-use usbd_dfu::Capabilities;
-
-use super::{ApplicationRef, APPLICATION_REGION_START, FLASH_END, MANIFEST_REGION_START};
-
-struct ManifestationState {
-    sector: Sector,
-}
-impl ManifestationState {
-    fn update(&mut self, flash: &mut stm32f4xx_hal::pac::FLASH) -> Result<bool, usbd_dfu::Error> {
-        // check current sector is erased
-        // get next sector
-        // if none
-        //  update manifest
-        // else
-        //  erase sector
-        Ok(false)
-    }
-}
+use super::ApplicationRef;
 
 enum DFUModeState {
     DownloadState,
@@ -24,13 +7,11 @@ enum DFUModeState {
 }
 
 pub struct DFUModeImpl {
-    memory: super::super::Memory,
     state: DFUModeState,
 }
 impl DFUModeImpl {
-    pub fn new(memory: super::super::Memory) -> Self {
+    pub fn new<T>(_: T) -> Self {
         Self {
-            memory,
             state: DFUModeState::None,
         }
     }
@@ -49,27 +30,29 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         app.compute_hash() == manifest.hash
     }
     fn is_transfer_complete(&mut self) -> Result<bool, usbd_dfu::Error> {
-        let state = match &mut self.state {
-            DFUModeState::DownloadState(state) => state,
-            _ => return Err(usbd_dfu::Error::Unknown),
-        };
-        dbgprint!("update_transfer\r\n");
-        state.update(&mut self.flash)
+        todo!()
+        //let state = match &mut self.state {
+        //    DFUModeState::DownloadState(state) => state,
+        //    _ => return Err(usbd_dfu::Error::Unknown),
+        //};
+        //dbgprint!("update_transfer\r\n");
+        //state.update(&mut self.flash)
     }
     fn is_manifestation_in_progress(&mut self) -> bool {
         //if state.program_ptr != (MANIFEST_REGION_START as *const u8) {
         //    return Err(usbd_dfu::Error::NotDone);
         //}
         dbgprint!("update manifest\r\n");
-        self.state = DFUModeState::None;
+        //self.state = DFUModeState::None;
         false
     }
 
     fn poll(&mut self) -> Result<(), usbd_dfu::Error> {
-        match &mut self.state {
-            DFUModeState::DownloadState(state) => state.update(&mut self.flash).map(|_| ()),
-            _ => Ok(()),
-        }
+        todo!()
+        //match &mut self.state {
+        //    DFUModeState::DownloadState(state) => state.update(&mut self.flash).map(|_| ()),
+        //    _ => Ok(()),
+        //}
     }
 
     fn upload(
@@ -83,23 +66,24 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
         //    block_number,
         //    buf.len()
         //);
-        if let DFUModeState::None = self.state {
-            self.state = DFUModeState::Upload(super::ApplicationRef::get().0);
-        }
-        let app_slice = match &mut self.state {
-            DFUModeState::Upload(state) => state,
-            _ => return Err(usbd_dfu::Error::Unknown),
-        };
+        //if let DFUModeState::None = self.state {
+        //    self.state = DFUModeState::Upload(super::ApplicationRef::get().0);
+        //}
+        //let app_slice = match &mut self.state {
+        //    DFUModeState::Upload(state) => state,
+        //    _ => return Err(usbd_dfu::Error::Unknown),
+        //};
 
-        let size = usize::min(buf.len(), app_slice.len());
-        buf[..size].copy_from_slice(&app_slice[..size]);
-        if size != 0 {
-            *app_slice = &app_slice[size..];
-        } else {
-            self.state = DFUModeState::None;
-        }
+        //let size = usize::min(buf.len(), app_slice.len());
+        //buf[..size].copy_from_slice(&app_slice[..size]);
+        //if size != 0 {
+        //    *app_slice = &app_slice[size..];
+        //} else {
+        //    self.state = DFUModeState::None;
+        //}
 
-        Ok(size)
+        //Ok(size)
+        todo!()
     }
     fn download(
         &mut self,
@@ -108,28 +92,28 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
     ) -> core::result::Result<(), usbd_dfu::Error> {
         dbgprint!("{}-{}\r\n", _block_number, buf.len());
 
-        if let DFUModeState::None = self.state {
-            self.state = DFUModeState::DownloadState(DownloadState {
-                array: [0; Self::TRANSFER_SIZE as usize],
-                ptr: 0,
-                used: 0,
-                program_ptr: APPLICATION_REGION_START as *const u8,
-                current_sector: None,
-            });
-        }
-        let state = match &mut self.state {
-            DFUModeState::DownloadState(state) => state,
-            _ => return Err(usbd_dfu::Error::Unknown),
-        };
+        //if let DFUModeState::None = self.state {
+        //    self.state = DFUModeState::DownloadState(DownloadState {
+        //        array: [0; Self::TRANSFER_SIZE as usize],
+        //        ptr: 0,
+        //        used: 0,
+        //        program_ptr: APPLICATION_REGION_START as *const u8,
+        //        current_sector: None,
+        //    });
+        //}
+        //let state = match &mut self.state {
+        //    DFUModeState::DownloadState(state) => state,
+        //    _ => return Err(usbd_dfu::Error::Unknown),
+        //};
 
-        let end_ptr = unsafe { state.program_ptr.offset(buf.len() as isize) };
-        if end_ptr >= (FLASH_END as *const u8) {
-            return Err(usbd_dfu::Error::Address);
-        }
+        //let end_ptr = unsafe { state.program_ptr.offset(buf.len() as isize) };
+        //if end_ptr >= (FLASH_END as *const u8) {
+        //    return Err(usbd_dfu::Error::Address);
+        //}
 
-        state.array[..buf.len()].copy_from_slice(buf);
-        state.used = buf.len();
-        state.ptr = 0;
+        //state.array[..buf.len()].copy_from_slice(buf);
+        //state.used = buf.len();
+        //state.ptr = 0;
         Ok(())
     }
 }
