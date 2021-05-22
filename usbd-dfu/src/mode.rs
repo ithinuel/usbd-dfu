@@ -1,6 +1,3 @@
-use usb_device::class_prelude::*;
-use usb_device::Result;
-
 use super::{
     Capabilities, Error, Request, State, DFU_FUNCTIONAL, DFU_VERSION, USB_CLASS_DFU,
     USB_DFU_MODE_PROTOCOL, USB_SUB_CLASS_DFU,
@@ -10,14 +7,20 @@ pub trait DeviceFirmwareUpgrade: Capabilities {
     const POLL_TIMEOUT: u32;
 
     fn is_firmware_valid(&mut self) -> bool;
-    fn is_transfer_complete(&mut self) -> core::result::Result<bool, Error>;
-    fn is_manifestation_in_progress(&mut self) -> bool;
+    fn is_transfer_complete(&mut self) -> crate::Result<bool>;
+    fn is_manifestation_in_progress(&mut self) -> crate::Result<bool>;
 
-    fn poll(&mut self) -> core::result::Result<(), Error>;
+    fn poll(&mut self) -> crate::Result<()>;
 
-    fn upload(&mut self, block_number: u16, buf: &mut [u8]) -> core::result::Result<usize, Error>;
-    fn download(&mut self, block_number: u16, buf: &[u8]) -> core::result::Result<(), Error>;
+    fn upload(&mut self, block_number: u16, buf: &mut [u8]) -> crate::Result<usize>;
+    fn download(&mut self, block_number: u16, buf: &[u8]) -> crate::Result<()>;
 }
+
+// ================================================================================================
+// class implementation
+
+use usb_device::class_prelude::*;
+use usb_device::Result;
 
 pub struct DFUModeClass<H: DeviceFirmwareUpgrade, B: UsbBus> {
     interface_number: InterfaceNumber,
@@ -114,16 +117,17 @@ impl<H: DeviceFirmwareUpgrade, B: UsbBus> DFUModeClass<H, B> {
         let req = xfer.request();
         match req.request {
             Request::DFU_GETSTATE => self.accept_get_state(xfer),
-            Request::DFU_GETSTATUS if self.handler.is_manifestation_in_progress() => {
-                self.state = State::DfuManifest(H::POLL_TIMEOUT);
-                self.accept_get_status(xfer, H::POLL_TIMEOUT)
-            }
-            Request::DFU_GETSTATUS
-                if H::IS_MANIFESTATION_TOLERANT && !self.handler.is_manifestation_in_progress() =>
-            {
-                self.state = State::DfuIdle;
-                self.accept_get_status(xfer, H::POLL_TIMEOUT)
-            }
+            Request::DFU_GETSTATUS => match self.handler.is_manifestation_in_progress() {
+                Ok(true) => {
+                    self.state = State::DfuManifest(H::POLL_TIMEOUT);
+                    self.accept_get_status(xfer, H::POLL_TIMEOUT)
+                }
+                Ok(false) if H::IS_MANIFESTATION_TOLERANT => {
+                    self.state = State::DfuIdle;
+                    self.accept_get_status(xfer, H::POLL_TIMEOUT)
+                }
+                _ => self.stall_in(xfer),
+            },
             _ => self.stall_in(xfer),
         }
     }

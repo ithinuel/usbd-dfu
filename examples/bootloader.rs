@@ -38,6 +38,7 @@ fn main() -> ! {
 
     use usbd_dfu::mode::DeviceFirmwareUpgrade;
     if dfu.is_firmware_valid() {
+        usbd_dfu_demo::dbgprint!("Firmware is valid");
         platform::jump_to_application();
     }
 

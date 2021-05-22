@@ -33,3 +33,21 @@ where
         }
     }
 }
+
+pub fn poll_once<T>(t: T) -> Option<T::Output>
+where
+    T: Future,
+{
+    let raw_waker = RawWaker::new(core::ptr::null(), &VTABLE);
+    pin_mut!(t);
+
+    unsafe {
+        let waker = Waker::from_raw(raw_waker);
+        let mut ctx = Context::from_waker(&waker);
+
+        match t.as_mut().poll(&mut ctx) {
+            Poll::Ready(out) => Some(out),
+            Poll::Pending => None,
+        }
+    }
+}

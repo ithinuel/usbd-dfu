@@ -36,11 +36,7 @@ fn main() -> ! {
     let size = 80 * 1024; // in bytes
     unsafe { ALLOCATOR.init(start, size) };
 
-    let mut serial = SerialPort::new_with_store(
-        &usb_bus,
-        unsafe { core::mem::MaybeUninit::<[u8; 128]>::uninit().assume_init() },
-        unsafe { core::mem::MaybeUninit::<[u8; 1024]>::uninit().assume_init() },
-    );
+    let mut serial = SerialPort::new_with_store(&usb_bus, [0u8; 128], [0u8; 1024]);
     let mut dfu = DFURuntimeClass::new(&usb_bus, dfu);
     let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
         .manufacturer("Fake company")
@@ -54,14 +50,17 @@ fn main() -> ! {
         .device_protocol(0)
         .build();
 
-    let mut timestamp = 0u64;
     let mut buf = [0u8; 256];
+    #[cfg(any(feature = "debug-uart", feature = "debug-buffer"))]
+    let mut timestamp = 0u64;
+    #[cfg(any(feature = "debug-uart", feature = "debug-buffer"))]
     let mut trace_printed = false;
 
     executor::block_on(async move {
         loop {
             if cp.SYST.has_wrapped() {
                 dfu.poll(1);
+                #[cfg(any(feature = "debug-uart", feature = "debug-buffer"))]
                 if usb_dev.state() == UsbDeviceState::Configured {
                     timestamp += 1;
                 } else {
@@ -86,13 +85,14 @@ fn main() -> ! {
                 _ => 0,
             };
 
-            if let &[0x0D, ..] = &buf {
+            if let [0x0D, ..] = buf {
                 // read flash desc
-                let v = dfu.handler().read_manifest().await;
-                dbgprint!("{:?}", v);
+                let _v = dfu.handler().read_manifest().await;
+                dbgprint!("{:?}", _v);
             }
 
             // transfers previous error to trace buffer
+            #[cfg(any(feature = "debug-uart", feature = "debug-buffer"))]
             if timestamp >= 5000 && usb_dev.state() == UsbDeviceState::Configured && !trace_printed
             {
                 unsafe {
@@ -114,7 +114,7 @@ fn main() -> ! {
             #[cfg(feature = "debug-buffer")]
             {
                 // transfers trace buffer to output buffer
-                platform::consume_debug(|dbg| {
+                platform::debug::consume_debug(|dbg| {
                     let len = core::cmp::min(dbg.len(), buf.len() - _count);
                     buf[_count.._count + len].copy_from_slice(&dbg[..len]);
                     _count += len;

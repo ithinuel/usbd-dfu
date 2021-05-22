@@ -1,3 +1,5 @@
+use super::MANIFEST_REGION_START;
+
 macro_rules! impl_capabilities {
     ($name:ty) => {
         impl ::usbd_dfu::Capabilities for $name {
@@ -16,43 +18,13 @@ const HASH_LENGTH: usize = 20;
 #[cfg(feature = "use-sha256")]
 const HASH_LENGTH: usize = 32;
 
-use super::{APPLICATION_REGION_START, FLASH_END, MANIFEST_REGION_START};
-const APPLICATION_LENGTH: usize = MANIFEST_REGION_START - APPLICATION_REGION_START;
-
 type Hash = [u8; HASH_LENGTH];
-
-#[repr(C)]
-struct ApplicationRef(&'static [u8]);
-impl ApplicationRef {
-    fn get() -> Self {
-        let manifest = Manifest::get();
-        let length = usize::min(APPLICATION_LENGTH, manifest.application_length);
-        unsafe {
-            Self(core::slice::from_raw_parts(
-                APPLICATION_REGION_START as *const u8,
-                length,
-            ))
-        }
-    }
-    fn compute_hash(&self) -> Hash {
-        #[cfg(not(feature = "use-sha256"))]
-        {
-            let mut sha = sha1::Sha1::new();
-            sha.update(&self.0);
-            sha.digest().bytes()
-        }
-        #[cfg(feature = "use-sha256")]
-        {
-            hmac_sha256::Hash::hash(&self.0)
-        }
-    }
-}
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct Manifest {
-    pub application_length: usize,
-    pub hash: [u8; HASH_LENGTH],
+    pub length: usize,
+    pub hash: Hash,
 }
 impl Manifest {
     fn get() -> &'static Manifest {
@@ -61,7 +33,7 @@ impl Manifest {
 }
 
 #[cfg(feature = "application")]
-mod runtime {
+pub mod runtime {
     pub struct DFURuntimeImpl;
     impl DFURuntimeImpl {
         pub async fn read_manifest(&self) -> &'static super::Manifest {
@@ -78,6 +50,5 @@ mod runtime {
     }
 }
 
-#[path = "dfu_mode.rs"]
-mod mode;
-pub use mode::*;
+#[cfg(feature = "bootloader")]
+pub mod mode;
