@@ -6,7 +6,7 @@ TARGET ?= thumbv7em-none-eabihf
 all: application bootloader
 
 application bootloader:
-	@cargo build --target ${TARGET} --release --features ${BOARD},$@,use-sha256 --example $@
+	@cargo build --target ${TARGET} --release --features ${BOARD},$@,use-sha256,debug-buffer --example $@
 
 #%.bin:
 #    @cargo objcopy --target ${TARGET} --release --features ${BOARD},$(basename $@) --example $(basename $@) -- -O binary

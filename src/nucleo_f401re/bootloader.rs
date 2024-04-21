@@ -1,5 +1,6 @@
 use core::convert::TryFrom;
 use core::task::Poll;
+use stm32f4xx_hal::rcc::RccExt;
 use usbd_dfu::Result;
 
 use super::MANIFEST_REGION_START;
@@ -99,10 +100,11 @@ impl Memory {
     }
 
     pub fn poll(&mut self) -> Poll<Result<usize>> {
-        crate::dbgprint!("{:x?}\r\n", self.state);
+        //crate::dbgprint!(".");
         match self.state {
             MemoryState::Idle => Poll::Ready(Ok(0)), /* unused */
             MemoryState::Erasing(sector) => {
+                //crate::dbgprint!("{:x?}\r\n", self.state);
                 let sr = self.flash.sr.read();
                 if sr.bsy().bit_is_set() {
                     Poll::Pending
@@ -234,18 +236,23 @@ pub fn jump_to_application() -> ! {
         {
             dp.RCC.apb1rstr.write_with_zero(|w| w.uart2rst().set_bit());
         }
-        //dp.RCC.constrain().cfgr.freeze();
+        let clocks = dp.RCC.constrain().cfgr.freeze();
+        #[cfg(feature = "debug-buffer")]
+        dbgprint!("clocks {:?}\r\n", clocks.hclk()); //
+        dbgprint!("clocks {:?}\r\n", clocks.sysclk()); //
+        dbgprint!("clocks {:?}\r\n", clocks.pll48clk()); //
 
-        dp.FLASH.acr.modify(|_, w| {
-            w.latency()
-                .ws0()
-                .icen()
-                .clear_bit()
-                .dcen()
-                .clear_bit()
-                .prften()
-                .clear_bit()
-        });
+        // This for some reason breaks the system.
+        //dp.FLASH.acr.modify(|_, w| {
+        //    w.latency()
+        //        .ws0()
+        //        .icen()
+        //        .clear_bit()
+        //        .dcen()
+        //        .clear_bit()
+        //        .prften()
+        //        .clear_bit()
+        //});
         cp.SCB.vtor.write(APPLICATION_REGION_START as u32);
         //cp.SCB.disable_dcache(&mut cp.CPUID);
         //cp.SCB.clean_invalidate_dcache(&mut cp.CPUID);

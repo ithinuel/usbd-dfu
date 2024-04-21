@@ -1,11 +1,13 @@
+use core::{convert::TryFrom, task::Poll};
+
+use stm32f4xx_hal::gpio::{gpioc::PC13, Floating, Input};
+use usbd_dfu::{Capabilities, Result};
+
+use super::{Hash, Manifest};
 use crate::platform::{
     bootloader::{Memory, Sector, APPLICATION_LENGTH, APPLICATION_REGION_START},
     MANIFEST_REGION_START,
 };
-use core::{convert::TryFrom, task::Poll};
-use usbd_dfu::{Capabilities, Result};
-
-use super::{Hash, Manifest};
 
 #[repr(C)]
 pub struct ApplicationRef(&'static [u8]);
@@ -157,7 +159,7 @@ impl Program {
                     self.addr += n;
                     wr_ptr += n;
 
-                    debug_assert!(wr_ptr <= data_len);
+                    assert!(wr_ptr <= data_len);
                     self.state = if wr_ptr == data_len {
                         ProgramState::AwaitData
                     } else {
@@ -180,7 +182,7 @@ impl Program {
                     self.addr += n;
                     wr_ptr += n;
 
-                    debug_assert!(wr_ptr <= data.len());
+                    assert!(wr_ptr <= data.len());
                     if wr_ptr == data.len() {
                         self.state = ProgramState::Done;
                         Poll::Ready(Ok(()))
@@ -285,24 +287,31 @@ enum DFUModeState {
 pub struct DFUModeImpl {
     state: DFUModeState,
     memory: Memory,
+    boot_mode: PC13<Input<Floating>>,
 }
 impl DFUModeImpl {
-    pub fn new(memory: Memory) -> Self {
+    pub fn new(memory: Memory, boot_mode: PC13<Input<Floating>>) -> Self {
         Self {
             state: DFUModeState::Idle,
             memory,
+            boot_mode,
         }
     }
 }
 
 impl_capabilities!(DFUModeImpl);
 impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
-    const POLL_TIMEOUT: u32 = 1;
+    const POLL_TIMEOUT: u32 = 10;
 
     fn is_firmware_valid(&mut self) -> bool {
         let manifest = super::Manifest::get();
 
         dbgprint!("{:x?}\r\n", &manifest);
+
+        use embedded_hal::digital::v2::InputPin;
+        if self.boot_mode.is_low().unwrap_or_else(|_| unreachable!()) {
+            return false;
+        }
 
         let app = ApplicationRef::get();
         let is_hash_valid = app.compute_hash() == manifest.hash;
@@ -360,18 +369,19 @@ impl usbd_dfu::mode::DeviceFirmwareUpgrade for DFUModeImpl {
     fn poll(&mut self) -> Result<()> {
         //dbgprint!("{:x?}\r\n", &self.state);
         match &mut self.state {
-            DFUModeState::Download(state) | DFUModeState::Manifetation(state) => {
-                match state.poll(&mut self.memory) {
-                    Poll::Ready(Ok(())) => {
-                        self.state = DFUModeState::Idle;
-                        Ok(())
+            DFUModeState::Download(program) | DFUModeState::Manifetation(program) => {
+                match program.poll(&mut self.memory) {
+                    Poll::Pending => {}
+                    Poll::Ready(Ok(())) => self.state = DFUModeState::Idle,
+                    Poll::Ready(Err(e)) => {
+                        self.state = DFUModeState::Error;
+                        return Err(e);
                     }
-                    Poll::Ready(Err(e)) => Err(e),
-                    Poll::Pending => Ok(()),
                 }
             }
-            _ => Ok(()),
+            _ => {}
         }
+        Ok(())
     }
 
     fn upload(&mut self, _block_number: u16, buf: &mut [u8]) -> Result<usize> {

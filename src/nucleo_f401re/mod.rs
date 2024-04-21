@@ -2,8 +2,8 @@
 //! | Sector |    Start    |     End     | Size (in KiB) | use
 //! |--------|-------------|-------------|---------------|----
 //! |      0 | 0x0800_0000 | 0x0800_3FFF |            16 | Bootloader
-//! |      1 | 0x0800_4000 | 0x0800_7FFF |            16 | Application
-//! |      2 | 0x0800_8000 | 0x0800_BFFF |            16 | ...
+//! |      1 | 0x0800_4000 | 0x0800_7FFF |            16 |
+//! |      2 | 0x0800_8000 | 0x0800_BFFF |            16 | Application
 //! |      3 | 0x0800_C000 | 0x0800_FFFF |            16 |
 //! |      4 | 0x0801_0000 | 0x0801_FFFF |            64 |
 //! |      5 | 0x0802_0000 | 0x0803_FFFF |           128 |
@@ -40,7 +40,7 @@ pub fn reset() -> ! {
 
 pub fn init() -> (
     usb_device::bus::UsbBusAllocator<impl usb_device::class_prelude::UsbBus>,
-    stm32f4xx_hal::gpio::gpioa::PA10<stm32f4xx_hal::gpio::Output<stm32f4xx_hal::gpio::PushPull>>,
+    stm32f4xx_hal::gpio::gpioa::PA5<stm32f4xx_hal::gpio::Output<stm32f4xx_hal::gpio::PushPull>>,
     cortex_m::Peripherals,
     DFUImpl,
 ) {
@@ -67,7 +67,9 @@ pub fn init() -> (
     cp.SYST.enable_counter();
 
     let gpioa = dp.GPIOA.split();
-    let led = gpioa.pa10.into_push_pull_output();
+    let led = gpioa.pa5.into_push_pull_output();
+
+    let boot_mode = dp.GPIOC.split().pc13.into_floating_input();
 
     let usb = USB {
         usb_global: dp.OTG_FS_GLOBAL,
@@ -96,7 +98,7 @@ pub fn init() -> (
                 config,
                 clocks,
             )
-            .unwrap_or_else(|| unreachable!());
+            .unwrap_or_else(|_| unreachable!());
 
             WRITER = Some(serial);
         });
@@ -105,7 +107,7 @@ pub fn init() -> (
     #[cfg(feature = "application")]
     let dfu = DFUImpl;
     #[cfg(feature = "bootloader")]
-    let dfu = DFUImpl::new(bootloader::Memory::new(dp.FLASH));
+    let dfu = DFUImpl::new(bootloader::Memory::new(dp.FLASH), boot_mode);
 
     (
         UsbBus::new(usb, unsafe { EP_MEMORY.assume_init_mut() }),

@@ -57,6 +57,7 @@ fn main() -> ! {
 
     let mut counter: usize = 0;
     loop {
+        dfu.poll(0);
         if cp.SYST.has_wrapped() {
             dfu.poll(1);
             counter = counter.wrapping_add(1);

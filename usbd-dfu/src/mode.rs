@@ -308,9 +308,9 @@ impl<B: UsbBus, H: DeviceFirmwareUpgrade> UsbClass<B> for DFUModeClass<H, B> {
 
         let _ = match self.state {
             State::DfuIdle => self.idle_in(xfer),
-            State::DfuDnloadSync => self.download_sync_in(xfer),
+            State::DfuDnloadBusy(_) | State::DfuDnloadSync => self.download_sync_in(xfer),
             State::DfuDnloadIdle => self.download_idle_in(xfer),
-            State::DfuManifestSync => self.manifest_sync_in(xfer),
+            State::DfuManifest(_) | State::DfuManifestSync => self.manifest_sync_in(xfer),
             State::DfuManifestWaitReset => xfer.accept_with_static(&[]),
             State::DfuUploadIdle => self.upload_in(xfer),
             State::DfuError(_) => self.error_in(xfer),
